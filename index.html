@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>AI PDF Chatbot</title>
+    <link rel="stylesheet" href="/src/index.css">
+    <script type="module" src="/src/main.js"></script>
+  </head>
+  <body class="bg-slate-50 text-slate-900 font-sans min-h-screen flex flex-col overflow-hidden">
+    <!-- Top Navigation Bar -->
+    <nav class="h-16 bg-white border-b border-slate-200 px-8 flex items-center justify-between shrink-0">
+      <div class="flex items-center gap-3">
+        <div class="w-8 h-8 bg-indigo-600 rounded-lg flex items-center justify-center text-white font-bold">G</div>
+        <span class="text-slate-900 font-semibold text-lg">AI PDF Chatbot</span>
+      </div>
+      <div class="flex items-center gap-4">
+        <span class="px-3 py-1 bg-indigo-50 text-indigo-700 text-xs font-medium rounded-full border border-indigo-100">Gemini Active</span>
+        <div class="w-8 h-8 rounded-full bg-slate-200 border border-slate-300"></div>
+      </div>
+    </nav>
+
+    <!-- Main Content Area -->
+    <div class="flex-1 flex overflow-hidden">
+      
+      <!-- Sidebar: Controls -->
+      <aside class="w-80 bg-white border-r border-slate-200 p-6 flex flex-col gap-8 shrink-0">
+        <!-- Upload Section -->
+        <div class="space-y-4">
+          <h3 class="text-xs font-bold uppercase tracking-wider text-slate-500">Document Source</h3>
+          <label class="border-2 border-dashed border-slate-200 rounded-xl p-6 flex flex-col items-center gap-3 bg-slate-50 cursor-pointer hover:bg-slate-100 transition-colors">
+            <svg class="w-8 h-8 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"></path>
+            </svg>
+            <span id="file-name" class="text-sm text-slate-600 text-center break-all">Select PDF</span>
+            <input type="file" id="pdf-upload" accept=".pdf" class="hidden" />
+          </label>
+          
+          <button id="upload-btn" class="w-full py-2.5 bg-indigo-600 text-white rounded-lg font-medium text-sm hover:bg-indigo-700 transition-colors shadow-sm disabled:opacity-50">
+            Process Document
+          </button>
+          
+          <p id="upload-status" class="text-center text-[10px] font-medium uppercase tracking-tight"></p>
+        </div>
+
+        <!-- Extraction Info Section -->
+        <div class="space-y-4 pt-4 border-t border-slate-100">
+          <h3 class="text-xs font-bold uppercase tracking-wider text-slate-500">Extraction Info</h3>
+          <div id="extraction-info" class="bg-indigo-50/50 p-4 rounded-xl border border-indigo-100">
+            <p class="text-xs text-indigo-700 leading-relaxed italic">Upload a file to see extracted context length and metadata.</p>
+          </div>
+          
+          <button id="summarize-btn" class="w-full py-2.5 bg-indigo-50 text-indigo-700 border border-indigo-200 rounded-lg font-bold text-[10px] uppercase tracking-widest hover:bg-indigo-100 transition-all shadow-sm disabled:opacity-50" disabled>
+            Generate Summary
+          </button>
+
+          <div id="summary-container" class="hidden animate-in fade-in slide-in-from-top-2 duration-300">
+            <h4 class="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">Executive Summary</h4>
+            <div class="bg-slate-50 border border-slate-200 p-4 rounded-xl relative">
+              <p id="summary-text" class="text-[11px] leading-relaxed text-slate-600 italic"></p>
+            </div>
+          </div>
+        </div>
+
+        <div class="mt-auto space-y-2">
+          <button id="clear-history" class="w-full py-2.5 bg-white border border-slate-200 text-slate-600 rounded-lg font-medium text-sm hover:bg-slate-50 transition-colors shadow-sm">
+            Clear Chat History
+          </button>
+          <p class="text-[10px] text-slate-400 text-center">Powered by Google Gemini 1.5 Flash</p>
+        </div>
+      </aside>
+
+      <!-- Main: Chat Interface -->
+      <main class="flex-1 flex flex-col bg-white relative">
+        
+        <!-- Messages Area -->
+        <div id="chat-messages" class="flex-1 overflow-y-auto p-8 space-y-6 flex flex-col scroll-smooth">
+          <!-- Initial Assistant Message -->
+          <div class="flex justify-start gap-4">
+            <div class="w-8 h-8 rounded-full bg-indigo-100 flex items-center justify-center flex-shrink-0">
+               <svg class="w-5 h-5 text-indigo-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z"></path>
+              </svg>
+            </div>
+            <div class="bg-slate-50 border border-slate-200 p-5 rounded-2xl rounded-tl-none max-w-2xl shadow-sm">
+              <p class="text-sm text-slate-800">Hello! Please upload a PDF in the sidebar to begin. I can help you analyze, summarize, or extract specific information from your document.</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- Input Bar -->
+        <div class="p-6 bg-white border-t border-slate-200">
+          <div class="max-w-4xl mx-auto flex gap-3 relative">
+            <input 
+              type="text" 
+              id="chat-input"
+              placeholder="Ask a question about the PDF..." 
+              class="flex-1 bg-slate-50 border border-slate-200 rounded-xl px-5 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 transition-all disabled:opacity-50"
+              disabled
+            >
+            <button id="chat-send" class="px-6 py-3 bg-indigo-600 text-white rounded-xl font-semibold text-sm hover:bg-indigo-700 transition-all shadow-md flex items-center gap-2 disabled:opacity-50" disabled>
+              <span>Ask AI</span>
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14 5l7 7m0 0l-7 7m7-7H3"></path>
+              </svg>
+            </button>
+          </div>
+          <p class="text-center text-[10px] text-slate-400 mt-4">Gemini 1.5 Flash generates answers based on the document provided. Always verify facts.</p>
+        </div>
+
+      </main>
+    </div>
+  </body>
+</html>
+
+

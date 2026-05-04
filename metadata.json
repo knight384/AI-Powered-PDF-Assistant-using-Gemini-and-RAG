@@ -1,0 +1,6 @@
+{
+  "name": "AI PDF Chatbot",
+  "description": "A RAG-based chatbot that allows you to upload PDFs and ask questions about their content using Google Gemini.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}
