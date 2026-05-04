@@ -2,14 +2,7 @@ import express from "express";
 import cors from "cors";
 import path from "path";
 import multer from "multer";
-import { createRequire } from "module";
-const require = createRequire(import.meta.url);
-const pdfModule = require("pdf-parse");
-let pdfFunc = pdfModule;
-if (typeof pdfFunc !== 'function' && pdfModule.default) {
-  pdfFunc = pdfModule.default;
-}
-const pdf = pdfFunc;
+import { PDFParse } from "pdf-parse";
 import { GoogleGenAI } from "@google/genai";
 import { createServer as createViteServer } from "vite";
 import { fileURLToPath } from "url";
@@ -24,76 +17,40 @@ async function startServer() {
   // Initialize Gemini
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) {
-    console.warn("GEMINI_API_KEY not found in environment");
+    console.error("CRITICAL: GEMINI_API_KEY is not set in the environment.");
   }
   const ai = new GoogleGenAI({ apiKey: apiKey || "" });
 
-  app.use(cors());
-  app.use(express.json({ limit: '10mb' }));
-  app.use(express.urlencoded({ limit: '10mb', extended: true }));
-
-  // RAG Storage
+  // RAG Storage (Simple in-memory for session)
   let storedFullText = "";
   let storedChunks: string[] = [];
   let storedEmbeddings: { text: string; embedding: number[] }[] = [];
-  let totalChunks = 0;
-
-  // Chat History Memory
-  let chatHistory: { role: "user" | "assistant"; content: string }[] = [];
-
-  function trimHistory() {
-    if (chatHistory.length > 10) {
-      chatHistory = chatHistory.slice(-10);
-    }
-  }
 
   function cosineSimilarity(a: number[], b: number[]) {
     let dot = 0, magA = 0, magB = 0;
     for (let i = 0; i < a.length; i++) {
-      dot += a[i] * b[i];
-      magA += a[i] * a[i];
-      magB += b[i] * b[i];
+        dot += a[i] * b[i];
+        magA += a[i] * a[i];
+        magB += b[i] * b[i];
     }
     return dot / (Math.sqrt(magA) * Math.sqrt(magB));
   }
 
-  function tokenize(text: string): string[] {
-    const stopWords = new Set(["a", "an", "the", "and", "or", "but", "if", "then", "else", "when", "at", "from", "by", "for", "with", "in", "on", "to", "is", "was", "are", "were", "what", "how", "why", "can", "could", "would", "should"]);
-    return text.toLowerCase()
-      .replace(/[^\w\s]/g, "")
-      .split(/\s+/)
-      .filter(token => token.length > 2 && !stopWords.has(token));
-  }
-
   function chunkText(text: string, size = 3000) {
     const chunks = [];
-    // Ensure we don't create too many chunks
     const dynamicSize = Math.max(size, Math.floor(text.length / 50));
     for (let i = 0; i < text.length; i += dynamicSize) {
-      const chunk = text.slice(i, i + dynamicSize).trim();
-      if (chunk.length > 20) {
-        chunks.push(chunk);
-      }
+        const chunk = text.slice(i, i + dynamicSize).trim();
+        if (chunk.length > 20) {
+            chunks.push(chunk);
+        }
     }
     return chunks;
   }
 
-  async function getRelevantChunks(question: string) {
-    const response = await ai.models.embedContent({
-      model: "gemini-embedding-2-preview",
-      contents: question,
-    });
-    const queryEmbedding = response.embeddings[0].values;
-
-    const scored = storedEmbeddings.map(item => ({
-      text: item.text,
-      score: cosineSimilarity(item.embedding, queryEmbedding),
-    }));
-
-    return scored
-      .sort((a, b) => b.score - a.score)
-      .slice(0, 3);
-  }
+  app.use(cors());
+  app.use(express.json({ limit: '10mb' }));
+  app.use(express.urlencoded({ limit: '10mb', extended: true }));
 
   // Set up multer for file uploads with limits
   const upload = multer({ 
@@ -101,7 +58,7 @@ async function startServer() {
     limits: { fileSize: 10 * 1024 * 1024 } // 10MB limit
   });
 
-  // Upload endpoint
+  // Upload endpoint: only extracts text from PDF
   app.post("/api/upload", (req, res, next) => {
     console.log("Upload request received");
     upload.single("pdf")(req, res, (err) => {
@@ -113,186 +70,162 @@ async function startServer() {
     });
   }, async (req, res) => {
     try {
-      console.log("Starting PDF processing", req.file ? `File size: ${req.file.size}` : "No file");
       if (!req.file) {
         return res.status(400).json({ error: "No PDF file uploaded" });
       }
 
-      if (typeof pdf !== 'function') {
-        console.error("PDF parser is not a function:", typeof pdf);
-        return res.status(500).json({ error: "PDF parser initialization failed" });
+      let data;
+      let parser;
+      try {
+        parser = new PDFParse({ data: req.file.buffer });
+        data = await parser.getText();
+      } catch (pdfError: any) {
+        console.error("Internal pdf-parse error:", pdfError);
+        return res.status(422).json({ 
+          error: "PDF structure is invalid or unreadable", 
+          details: pdfError.message 
+        });
+      } finally {
+        if (parser) {
+          try { await parser.destroy(); } catch (e) { console.error("Error destroying parser:", e); }
+        }
       }
 
-      const data = await pdf(req.file.buffer);
-      console.log("PDF parsed successfully", `Text length: ${data.text?.length}`);
-      const text = data.text || "";
+      const text = (data.text || "").trim();
+      
+      if (!text || text.length < 50) {
+        return res.status(422).json({ 
+          error: "No text found in PDF", 
+          details: "This document appears to be empty or contains only images (scanned)." 
+        });
+      }
+
+      console.log("PDF parsed successfully", `Text length: ${text.length}`);
+      
+      // Process embeddings on server
+      if (!apiKey) {
+        return res.status(500).json({ 
+          error: "Gemini API Key missing", 
+          details: "The server is not configured with a GEMINI_API_KEY. Please ensure it is set in the environment variables via the Settings menu." 
+        });
+      }
+
       storedFullText = text;
       storedChunks = chunkText(text);
-      totalChunks = storedChunks.length;
-      
-      // Generate embeddings in small parallel batches
       storedEmbeddings = [];
+
       const concurrencyLimit = 3;
       for (let i = 0; i < storedChunks.length; i += concurrencyLimit) {
         const batch = storedChunks.slice(i, i + concurrencyLimit);
-        console.log(`Processing embedding batch ${Math.floor(i / concurrencyLimit) + 1}/${Math.ceil(storedChunks.length / concurrencyLimit)}`);
-        
         await Promise.all(batch.map(async (chunk) => {
           try {
-            const result = await ai.models.embedContent({
+            const res = await ai.models.embedContent({
               model: "gemini-embedding-2-preview",
               contents: chunk,
             });
-
-            if (result && result.embeddings && result.embeddings[0] && result.embeddings[0].values) {
+            if (res?.embeddings?.[0]?.values) {
               storedEmbeddings.push({
                 text: chunk,
-                embedding: result.embeddings[0].values,
+                embedding: res.embeddings[0].values,
               });
             }
-          } catch (embedError) {
-            console.error("Single embedding error:", embedError);
+          } catch (e) {
+            console.error("Embedding chunk failed", e);
           }
         }));
       }
 
-      console.log(`Successfully indexed ${totalChunks} chunks with embeddings for RAG.`);
-      res.json({ message: "PDF uploaded and processed successfully", textLength: text.length });
-    } catch (error) {
+      res.json({ text, message: "Document processed and indexed." });
+    } catch (error: any) {
       console.error("PDF processing error:", error);
-      res.status(500).json({ error: "Failed to process PDF" });
+      res.status(500).json({ error: "Failed to process PDF", details: error.message });
     }
   });
 
   // Chat endpoint
   app.post("/api/chat", async (req, res) => {
     try {
-      const { question } = req.body;
-      if (!question) {
-        return res.status(400).json({ error: "Question is required" });
+      const { question, history } = req.body;
+      if (!apiKey) {
+        return res.status(500).json({ error: "Gemini API Key missing", details: "Please configure GEMINI_API_KEY." });
       }
       if (!storedEmbeddings.length) {
-        return res.status(400).json({ error: "No PDF context available. Please upload a PDF first." });
+        return res.status(400).json({ error: "No document indexed." });
       }
 
-      // Add user question to history
-      chatHistory.push({ role: "user", content: question });
+      // Semantic Search
+      const embedResponse = await ai.models.embedContent({
+        model: "gemini-embedding-2-preview",
+        contents: question,
+      });
+      const queryEmbedding = embedResponse.embeddings[0].values;
 
-      const relevantChunks = await getRelevantChunks(question);
+      const scored = storedEmbeddings.map(item => ({
+        text: item.text,
+        score: cosineSimilarity(item.embedding, queryEmbedding),
+      }));
 
-      if (relevantChunks.length === 0) {
-        return res.json({
-          answer: "No relevant information found in document."
-        });
-      }
+      const relevantChunks = scored
+        .sort((a, b) => b.score - a.score)
+        .slice(0, 3);
 
       const context = relevantChunks.map(item => item.text).join("\n");
-      const historyText = chatHistory
-        .map(msg => `${msg.role}: ${msg.content}`)
+      const historyText = (history || [])
+        .map((msg: any) => `${msg.sender}: ${msg.text}`)
         .join("\n");
 
-      const prompt = `
-You are an AI assistant.
+      const prompt = `You are an AI assistant. Answer ONLY from the context below.\n\nContext:\n${context}\n\nHistory:\n${historyText}\n\nQuestion:\n${question}`;
 
-Answer ONLY from the context below.
-
-Context:
-${context}
-
-History:
-${historyText}
-
-Question:
-${question}
-`;
-
-      const response = await ai.models.generateContent({
-        model: "gemini-3-flash-preview", // Alias for small fast model
+      const response = await ai.models.generateContentStream({
+        model: "gemini-3-flash-preview",
         contents: prompt,
       });
 
-      res.setHeader("Content-Type", "text/plain; charset=utf-8");
-      res.setHeader("Transfer-Encoding", "chunked");
-
-      const answer = response.text;
-      
-      // Stream the answer
-      for (let i = 0; i < answer.length; i++) {
-        res.write(answer[i]);
-        // Small delay for psychological streaming effect as requested
-        if (i % 3 === 0) await new Promise(r => setTimeout(r, 1));
+      res.setHeader("Content-Type", "text/plain");
+      for await (const chunk of response) {
+        res.write(chunk.text);
       }
-
-      // Append metadata
+      
+      // Send sources at the end
       const sourcesData = relevantChunks.map((chunk, index) => ({
         id: index + 1,
         preview: chunk.text.slice(0, 150) + "...",
         score: chunk.score.toFixed(2),
       }));
-
       res.write("\n__SOURCES_JSON__" + JSON.stringify(sourcesData));
-      
-      // Add assistant response to history
-      chatHistory.push({ role: "assistant", content: answer });
-      trimHistory();
-
       res.end();
-    } catch (error) {
+    } catch (error: any) {
       console.error("Chat error:", error);
-      res.status(500).json({ error: "Failed to generate AI response" });
+      res.status(500).json({ error: "Failed to generate AI response", details: error.message });
     }
   });
 
   // Summarize endpoint
   app.post("/api/summarize", async (req, res) => {
     try {
+      if (!apiKey) {
+        return res.status(500).json({ error: "Gemini API Key missing", details: "Please configure GEMINI_API_KEY." });
+      }
       if (!storedFullText) {
-        return res.status(400).json({ error: "No PDF context available. Please upload a PDF first." });
+        return res.status(400).json({ error: "No document loaded." });
       }
 
-      const prompt = `
-You are an expert editor. Please provide a concise, professional summary of the following document. 
-Focus on the main themes, key takeaways, and overall purpose.
-Keep it under 300 words.
-
-Document Content:
-${storedFullText.slice(0, 15000)}
-`;
-
+      const prompt = `Provide a concise summary of this document.\n\nContent:\n${storedFullText.slice(0, 15000)}`;
       const response = await ai.models.generateContent({
         model: "gemini-3-flash-preview",
         contents: prompt,
       });
 
       res.json({ summary: response.text });
-    } catch (error) {
-      console.error("Summarization error:", error);
-      res.status(500).json({ error: "Failed to generate summary" });
+    } catch (error: any) {
+      console.error("Summary error:", error);
+      res.status(500).json({ error: "Failed to generate summary", details: error.message });
     }
   });
 
   // Health check
   app.get("/api/health", (req, res) => {
-    res.json({ 
-      status: "ok", 
-      embeddingsLoaded: storedEmbeddings.length,
-      historySize: chatHistory.length 
-    });
-  });
-
-  // Reset chat history endpoint
-  app.post("/api/reset", (req, res) => {
-    chatHistory = [];
-    res.json({ message: "Chat history cleared" });
-  });
-
-  // Global Error Handler to ensure JSON responses
-  app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
-    console.error("Global error:", err);
-    res.status(err.status || 500).json({
-      error: err.message || "Internal Server Error",
-      stack: process.env.NODE_ENV === "production" ? undefined : err.stack
-    });
+    res.json({ status: "ok" });
   });
 
   // Vite middleware for development

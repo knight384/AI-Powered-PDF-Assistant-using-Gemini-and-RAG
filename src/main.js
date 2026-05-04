@@ -13,6 +13,7 @@ const summaryText = document.getElementById('summary-text');
 
 let isUploaded = false;
 let chatHistory = [];
+let storedFullTextLength = 0;
 
 // Load history on startup
 window.addEventListener('DOMContentLoaded', () => {
@@ -108,18 +109,20 @@ uploadBtn.addEventListener('click', async () => {
             chatSend.disabled = false;
             summarizeBtn.disabled = false;
             
+            storedFullTextLength = data.text.length;
+
             // Update Extraction Info
             const extractionInfo = document.getElementById('extraction-info');
             extractionInfo.innerHTML = `
                 <div class="flex flex-col gap-2">
                     <div class="flex items-center justify-between">
                         <span class="text-[10px] font-bold text-indigo-700 uppercase tracking-wider">Context Length</span>
-                        <span class="text-xs font-mono text-indigo-900">${data.textLength.toLocaleString()} chars</span>
+                        <span class="text-xs font-mono text-indigo-900">${storedFullTextLength.toLocaleString()} chars</span>
                     </div>
                     <div class="w-full bg-indigo-200 h-1 rounded-full overflow-hidden">
                         <div class="bg-indigo-600 h-full w-full"></div>
                     </div>
-                    <p class="text-[10px] text-indigo-600 italic">Document text extracted and ready for queries.</p>
+                    <p class="text-[10px] text-indigo-600 italic">Document text extracted and indexed on server.</p>
                 </div>
             `;
 
@@ -128,8 +131,10 @@ uploadBtn.addEventListener('click', async () => {
             
             addMessage('System', 'The document has been successfully parsed. How can I help you explore it?', 'system');
         } else {
-            uploadStatus.textContent = data.error || "UPLOAD FAILED";
-            uploadStatus.className = "text-center text-[10px] font-bold mt-3 text-red-500 tracking-widest";
+            const errorMsg = data.error || "UPLOAD FAILED";
+            const details = data.details ? ` (${data.details})` : "";
+            uploadStatus.textContent = errorMsg + details;
+            uploadStatus.className = "text-center text-[10px] font-bold mt-3 text-red-500 tracking-widest uppercase";
             uploadBtn.disabled = false;
         }
     } catch (error) {
@@ -147,24 +152,33 @@ summarizeBtn.addEventListener('click', async () => {
     summarizeBtn.disabled = true;
     summarizeBtn.textContent = "Summarizing...";
     
+    // Add typing indicator for feedback
+    const typingId = 'summary-typing-' + Date.now();
+    renderMessage('System', 'Generating document summary...', 'system', typingId);
+    
     try {
         const response = await fetch('/api/summarize', {
             method: 'POST'
         });
 
-        const data = await response.json();
+        const typingEl = document.getElementById(typingId);
+        if (typingEl) typingEl.remove();
 
         if (response.ok) {
+            const data = await response.json();
             summaryContainer.classList.remove('hidden');
             summaryText.textContent = data.summary;
             summarizeBtn.textContent = "Regenerate Summary";
+            addMessage('System', 'The document summary has been generated and displayed in the sidebar.', 'system');
         } else {
-            addMessage('System', 'Failed to generate summary: ' + (data.error || 'Unknown error'), 'system');
-            summarizeBtn.textContent = "Generate Summary";
+            const data = await response.json().catch(() => ({}));
+            throw new Error(data.error || "Summarization failed");
         }
     } catch (error) {
         console.error('Summary error:', error);
-        addMessage('System', 'Connection error while summarizing.', 'system');
+        const typingEl = document.getElementById(typingId);
+        if (typingEl) typingEl.remove();
+        addMessage('System', 'Error generating summary: ' + (error.message || 'Unknown error'), 'system');
         summarizeBtn.textContent = "Generate Summary";
     } finally {
         summarizeBtn.disabled = false;
@@ -196,23 +210,23 @@ async function sendMessage() {
         const response = await fetch('/api/chat', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ question })
+            body: JSON.stringify({ question, history: chatHistory })
         });
 
         if (!response.ok) {
-            const loadingEl = document.getElementById(typingId);
-            if (loadingEl) loadingEl.remove();
-            const errorJson = await response.json().catch(() => ({}));
-            addMessage('System', "Error: " + (errorJson.error || "Failed to get response."), 'system');
+            const typingEl = document.getElementById(typingId);
+            if (typingEl) typingEl.remove();
+            const data = await response.json().catch(() => ({}));
+            addMessage('System', "Error: " + (data.error || "Failed to get response."), 'system');
             return;
         }
 
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
+        
         let cumulativeText = "";
         const typingEl = document.getElementById(typingId);
         const textContainer = typingEl ? typingEl.querySelector('.message-text') : null;
-        
         if (textContainer) textContainer.textContent = "";
 
         while (true) {
@@ -252,7 +266,7 @@ async function sendMessage() {
         console.error('Chat error:', error);
         const typingEl = document.getElementById(typingId);
         if (typingEl) typingEl.remove();
-        addMessage('System', "Connection error. Please check your internet.", 'system');
+        addMessage('System', "Error: " + (error.message || "Failed to get response."), 'system');
     } finally {
         chatInput.disabled = false;
         chatSend.disabled = false;
