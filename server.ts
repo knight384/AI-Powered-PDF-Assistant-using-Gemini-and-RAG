@@ -5,7 +5,11 @@ import multer from "multer";
 import { createRequire } from "module";
 const require = createRequire(import.meta.url);
 const pdfModule = require("pdf-parse");
-const pdf = typeof pdfModule === 'function' ? pdfModule : pdfModule.default;
+let pdfFunc = pdfModule;
+if (typeof pdfFunc !== 'function' && pdfModule.default) {
+  pdfFunc = pdfModule.default;
+}
+const pdf = pdfFunc;
 import { GoogleGenAI } from "@google/genai";
 import { createServer as createViteServer } from "vite";
 import { fileURLToPath } from "url";
@@ -25,7 +29,8 @@ async function startServer() {
   const ai = new GoogleGenAI({ apiKey: apiKey || "" });
 
   app.use(cors());
-  app.use(express.json());
+  app.use(express.json({ limit: '10mb' }));
+  app.use(express.urlencoded({ limit: '10mb', extended: true }));
 
   // RAG Storage
   let storedFullText = "";
@@ -60,10 +65,15 @@ async function startServer() {
       .filter(token => token.length > 2 && !stopWords.has(token));
   }
 
-  function chunkText(text: string, size = 1000) {
+  function chunkText(text: string, size = 3000) {
     const chunks = [];
-    for (let i = 0; i < text.length; i += size) {
-      chunks.push(text.slice(i, i + size));
+    // Ensure we don't create too many chunks
+    const dynamicSize = Math.max(size, Math.floor(text.length / 50));
+    for (let i = 0; i < text.length; i += dynamicSize) {
+      const chunk = text.slice(i, i + dynamicSize).trim();
+      if (chunk.length > 20) {
+        chunks.push(chunk);
+      }
     }
     return chunks;
   }
@@ -85,33 +95,65 @@ async function startServer() {
       .slice(0, 3);
   }
 
-  // Set up multer for file uploads
-  const upload = multer({ storage: multer.memoryStorage() });
+  // Set up multer for file uploads with limits
+  const upload = multer({ 
+    storage: multer.memoryStorage(),
+    limits: { fileSize: 10 * 1024 * 1024 } // 10MB limit
+  });
 
   // Upload endpoint
-  app.post("/api/upload", upload.single("pdf"), async (req, res) => {
+  app.post("/api/upload", (req, res, next) => {
+    console.log("Upload request received");
+    upload.single("pdf")(req, res, (err) => {
+      if (err) {
+        console.error("Multer error:", err);
+        return res.status(400).json({ error: "File upload failed: " + err.message });
+      }
+      next();
+    });
+  }, async (req, res) => {
     try {
+      console.log("Starting PDF processing", req.file ? `File size: ${req.file.size}` : "No file");
       if (!req.file) {
         return res.status(400).json({ error: "No PDF file uploaded" });
       }
 
+      if (typeof pdf !== 'function') {
+        console.error("PDF parser is not a function:", typeof pdf);
+        return res.status(500).json({ error: "PDF parser initialization failed" });
+      }
+
       const data = await pdf(req.file.buffer);
-      const text = data.text;
+      console.log("PDF parsed successfully", `Text length: ${data.text?.length}`);
+      const text = data.text || "";
       storedFullText = text;
       storedChunks = chunkText(text);
       totalChunks = storedChunks.length;
       
-      // Generate embeddings for RAG
+      // Generate embeddings in small parallel batches
       storedEmbeddings = [];
-      for (const chunk of storedChunks) {
-        const result = await ai.models.embedContent({
-          model: "gemini-embedding-2-preview",
-          contents: chunk,
-        });
-        storedEmbeddings.push({
-          text: chunk,
-          embedding: result.embeddings[0].values,
-        });
+      const concurrencyLimit = 3;
+      for (let i = 0; i < storedChunks.length; i += concurrencyLimit) {
+        const batch = storedChunks.slice(i, i + concurrencyLimit);
+        console.log(`Processing embedding batch ${Math.floor(i / concurrencyLimit) + 1}/${Math.ceil(storedChunks.length / concurrencyLimit)}`);
+        
+        await Promise.all(batch.map(async (chunk) => {
+          try {
+            const result = await ai.models.embedContent({
+              model: "gemini-embedding-2-preview",
+              contents: chunk,
+            });
+
+            if (result && result.embeddings && result.embeddings[0] && result.embeddings[0].values) {
+              storedEmbeddings.push({
+                text: chunk,
+                embedding: result.embeddings[0].values,
+              });
+            }
+          } catch (embedError) {
+            console.error("Single embedding error:", embedError);
+          }
+        }));
       }
 
       console.log(`Successfully indexed ${totalChunks} chunks with embeddings for RAG.`);
@@ -229,10 +271,28 @@ ${storedFullText.slice(0, 15000)}
     }
   });
 
+  // Health check
+  app.get("/api/health", (req, res) => {
+    res.json({ 
+      status: "ok", 
+      embeddingsLoaded: storedEmbeddings.length,
+      historySize: chatHistory.length 
+    });
+  });
+
   // Reset chat history endpoint
   app.post("/api/reset", (req, res) => {
     chatHistory = [];
     res.json({ message: "Chat history cleared" });
+  });
+
+  // Global Error Handler to ensure JSON responses
+  app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
+    console.error("Global error:", err);
+    res.status(err.status || 500).json({
+      error: err.message || "Internal Server Error",
+      stack: process.env.NODE_ENV === "production" ? undefined : err.stack
+    });
   });
 
   // Vite middleware for development

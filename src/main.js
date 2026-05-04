@@ -77,7 +77,28 @@ uploadBtn.addEventListener('click', async () => {
             body: formData
         });
 
-        const data = await response.json();
+        let data;
+        const responseText = await response.text();
+        
+        // Detect AI Studio "Cookie check" page
+        if (responseText.includes('Cookie check') || responseText.includes('authInSeparateWindowButton')) {
+            uploadStatus.innerHTML = `
+                <div class="flex flex-col items-center gap-1">
+                    <span class="text-amber-600 font-bold">AUTH REQUIRED</span>
+                    <p class="text-[9px] text-amber-500 leading-tight">Your browser is blocking cookies. <br/> Open in <span class="font-bold underline">New Tab</span> (top right icon) to fix.</p>
+                </div>
+            `;
+            uploadStatus.className = "text-center mt-3 animate-pulse";
+            uploadBtn.disabled = false;
+            return;
+        }
+
+        try {
+            data = JSON.parse(responseText);
+        } catch (e) {
+            console.error("Non-JSON response received:", responseText);
+            throw new Error(`Server returned non-JSON response (${response.status})`);
+        }
 
         if (response.ok) {
             uploadStatus.textContent = "DOCUMENT READY";
